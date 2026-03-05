@@ -1,0 +1,11 @@
+# Saved credentials — never commit this
+credentials.json
+
+# Bambu auth token cache
+.bambu_token
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env

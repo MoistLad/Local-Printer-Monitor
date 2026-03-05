@@ -1,0 +1,3 @@
+paho-mqtt>=2.1.0
+rich>=13.0.0
+bambu-lab-cloud-api>=1.0.5
