@@ -9,12 +9,15 @@ Usage:
   2. python bambu_monitor.py
 """
 
-import base64
+# Standard library
 import json
+import socket
 import ssl
+import sys
 import threading
 import time
 
+# Third-party
 import paho.mqtt.client as mqtt
 from bambulab import BambuAuthenticator, BambuAuthError, BambuClient
 from rich import box
@@ -26,6 +29,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
+# Local
 import config
 
 # ── Everforest colour palette ─────────────────────────────────────────────────
@@ -38,7 +42,6 @@ T = {
     "yellow":  "#dbbc7f",   # amber       — temperatures, warnings
     "red":     "#e67e80",   # red         — errors, offline
     "purple":  "#d699b6",   # purple      — fans & speed
-    "orange":  "#dbbc7f",   # amber alias — progress (mid)
 }
 
 # ── Cloud MQTT brokers (region-based) ────────────────────────────────────────
@@ -47,6 +50,14 @@ CLOUD_BROKERS = {
     "china":  "cn.mqtt.bambulab.com",
 }
 CLOUD_PORT = 8883
+
+# ── AMS tray constants ────────────────────────────────────────────────────────
+AMS_TRAY_NONE     = "255"   # no tray selected
+AMS_TRAY_EXTERNAL = "254"   # external spool selected
+AMS_SLOT_COUNT    = 4       # number of AMS Lite slots
+
+# ── Fan speed scaling ─────────────────────────────────────────────────────────
+FAN_RAW_MAX = 15            # Bambu reports fan speed as 0–15
 
 # ── Lookup tables ─────────────────────────────────────────────────────────────
 SPEED_LABELS = {
@@ -145,7 +156,7 @@ def get_credentials(console: Console) -> dict:
 
 def fan_pct(raw: str) -> int:
     try:
-        return round(int(raw) / 15 * 100)
+        return round(int(raw) / FAN_RAW_MAX * 100)
     except (ValueError, TypeError):
         return 0
 
@@ -174,7 +185,7 @@ def hex_to_rgb(hex_str: str):
     try:
         h = hex_str.lstrip("#")
         return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    except Exception:
+    except (ValueError, IndexError):
         return None
 
 
@@ -368,7 +379,7 @@ def panel_fans_speed(p: dict) -> Panel:
 def panel_ams(p: dict) -> Panel:
     ams_data = p.get("ams", {})
     ams_list = ams_data.get("ams", [])
-    tray_now = str(ams_data.get("tray_now", "255"))
+    tray_now = str(ams_data.get("tray_now", AMS_TRAY_NONE))
     vt       = p.get("vt_tray", {})
 
     tbl = Table(
@@ -387,7 +398,7 @@ def panel_ams(p: dict) -> Panel:
         unit  = ams_list[0]
         trays = unit.get("tray", [])
 
-        for i in range(4):
+        for i in range(AMS_SLOT_COUNT):
             tray      = next((t for t in trays if str(t.get("id")) == str(i)), None)
             is_active = (str(i) == tray_now)
             marker    = " ◀" if is_active else ""
@@ -419,7 +430,7 @@ def panel_ams(p: dict) -> Panel:
         )
 
     # ── External spool — always shown ────────────────────────────────────────
-    is_ext_active = (tray_now == "254")
+    is_ext_active = (tray_now == AMS_TRAY_EXTERNAL)
     ext_marker    = " ◀" if is_ext_active else ""
     ext_lbl       = Text(f" Ext{ext_marker}", style=f"bold {T['green']}" if is_ext_active else T["dim"])
 
@@ -535,13 +546,17 @@ def on_message(client, userdata, msg):
             with state_lock:
                 state["print"].update(print_data)
                 state["last_update"] = time.strftime("%H:%M:%S")
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[mqtt] message parse error: {exc}", file=sys.stderr)
 
 
 # ── MQTT client setup ─────────────────────────────────────────────────────────
 
+_RETRY_BASE    = 5     # initial retry delay (seconds)
+_RETRY_MAX     = 120   # maximum retry delay (seconds)
+
 def _connect_with_retry(client: mqtt.Client, broker: str) -> None:
+    delay = _RETRY_BASE
     while True:
         try:
             client.connect(broker, CLOUD_PORT, keepalive=60)
@@ -549,14 +564,15 @@ def _connect_with_retry(client: mqtt.Client, broker: str) -> None:
         except Exception:
             with state_lock:
                 state["connected"] = False
-            time.sleep(10)
+            time.sleep(delay)
+            delay = min(delay * 2, _RETRY_MAX)
 
 
 def start_mqtt(uid: str, token: str, serial: str, region: str) -> mqtt.Client:
     broker = CLOUD_BROKERS.get(region, CLOUD_BROKERS["global"])
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
-        client_id=f"bambu-monitor-{serial}",
+        client_id=f"bambu-monitor-{serial}-{socket.gethostname()}",
     )
     client.username_pw_set(uid, token)
     client.user_data_set({"serial": serial})
@@ -598,12 +614,13 @@ def main():
         console.print(f"[{T['dim']}]Delete credentials.json and re-run to enter new credentials.[/]\n")
         return
 
+    api = BambuClient(token=token)
+
     # ── Step 3: Resolve MQTT username ─────────────────────────────────────────
     uid = creds.get("mqtt_username", "").strip()
     if not uid or not uid.startswith("u_"):
         console.print(f"[{T['dim']}]Fetching MQTT username from Bambu API...[/]")
         try:
-            api = BambuClient(token=token)
             info = api.get_user_info()
             numeric_uid = info.get("uid", "")
             uid = f"u_{numeric_uid}" if numeric_uid else "u_unknown"
@@ -617,7 +634,6 @@ def main():
     # ── Step 4: Fetch printer name ────────────────────────────────────────────
     console.print(f"[{T['dim']}]Fetching printer info...[/]")
     try:
-        api      = BambuClient(token=token)
         devices  = api.get_devices()
         # get_devices returns a list of device dicts
         if isinstance(devices, dict):
