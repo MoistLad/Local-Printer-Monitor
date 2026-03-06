@@ -47,6 +47,7 @@ sudo apt install -y \
     xfce4-terminal \
     unclutter \
     python3-full python3-venv \
+    x11-xserver-utils \
     git curl unzip fontconfig
 ok "System packages installed"
 
