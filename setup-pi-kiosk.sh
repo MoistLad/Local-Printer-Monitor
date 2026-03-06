@@ -237,6 +237,35 @@ xfce4-terminal --fullscreen --command="$HOME/app/run.sh" &
 OBEOF
 ok "Openbox autostart configured"
 
+# ── 14. Disable all screen sleep/blanking ──────────────────────────
+info "Disabling screen blanking..."
+
+# Kernel console blanking
+CMDLINE="/boot/firmware/cmdline.txt"
+if [ -f "$CMDLINE" ]; then
+    if ! grep -q "consoleblank=0" "$CMDLINE"; then
+        sudo sed -i 's/$/ consoleblank=0/' "$CMDLINE"
+        ok "Kernel console blanking disabled (cmdline.txt)"
+    else
+        ok "Kernel console blanking already disabled"
+    fi
+else
+    warn "$CMDLINE not found — add 'consoleblank=0' to your boot cmdline manually"
+fi
+
+# HDMI blanking
+CONFIG="/boot/firmware/config.txt"
+if [ -f "$CONFIG" ]; then
+    if ! grep -q "hdmi_blanking=0" "$CONFIG"; then
+        echo -e "\n# Keep HDMI signal alive\nhdmi_blanking=0" | sudo tee -a "$CONFIG" > /dev/null
+        ok "HDMI blanking disabled (config.txt)"
+    else
+        ok "HDMI blanking already disabled"
+    fi
+fi
+
+ok "Screen will stay on permanently"
+
 # ── Done ──────────────────────────────────────────────────────────
 echo ""
 echo -e "${G}════════════════════════════════════════════════${NC}"
